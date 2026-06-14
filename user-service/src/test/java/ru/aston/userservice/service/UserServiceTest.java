@@ -6,10 +6,12 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.kafka.core.KafkaTemplate;
 import ru.aston.userservice.dto.UserRequest;
 import ru.aston.userservice.dto.UserResponse;
 import ru.aston.userservice.dto.UserUpdateRequest;
 import ru.aston.userservice.entity.User;
+import ru.aston.userservice.event.UserEvent;
 import ru.aston.userservice.repository.UserRepository;
 
 import java.time.LocalDateTime;
@@ -19,6 +21,7 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -30,8 +33,12 @@ class UserServiceTest {
     @Mock
     private UserRepository userRepository;
 
+    @Mock
+    private KafkaTemplate<String, UserEvent> kafkaTemplate;   // <-- новый мок
+
     @InjectMocks
     private UserService userService;
+
 
     @Test
     void createUser_ValidData_ReturnsUserResponse() {
@@ -64,6 +71,13 @@ class UserServiceTest {
         assertThat(capturedUser.getName()).isEqualTo("Kirill");
         assertThat(capturedUser.getEmail()).isEqualTo("kirill@test.com");
         assertThat(capturedUser.getAge()).isEqualTo(30);
+
+        verify(kafkaTemplate).send(eq("user-events"), any(UserEvent.class));
+        ArgumentCaptor<UserEvent> eventCaptor = ArgumentCaptor.forClass(UserEvent.class);
+        verify(kafkaTemplate).send(eq("user-events"), eventCaptor.capture());
+        UserEvent event = eventCaptor.getValue();
+        assertThat(event.getOperation()).isEqualTo("CREATE");
+        assertThat(event.getEmail()).isEqualTo("kirill@test.com");
     }
 
     @Test
@@ -78,6 +92,7 @@ class UserServiceTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Name cannot be blank");
         verifyNoInteractions(userRepository);
+        verifyNoInteractions(kafkaTemplate);  // Kafka не должен вызываться
     }
 
     @Test
@@ -92,6 +107,7 @@ class UserServiceTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Invalid email");
         verifyNoInteractions(userRepository);
+        verifyNoInteractions(kafkaTemplate);
     }
 
     @Test
@@ -158,6 +174,8 @@ class UserServiceTest {
         assertThat(existing.getName()).isEqualTo("New Name");
         assertThat(existing.getEmail()).isEqualTo("new@mail.com");
         assertThat(existing.getAge()).isEqualTo(30);
+
+        verifyNoInteractions(kafkaTemplate);
     }
 
     @Test
@@ -173,12 +191,42 @@ class UserServiceTest {
                 .isInstanceOf(RuntimeException.class)
                 .hasMessageContaining("User not found");
         verify(userRepository, never()).save(any());
+        verifyNoInteractions(kafkaTemplate);
     }
 
     @Test
-    void deleteUser_Valid_CallsRepository() {
-        userService.deleteUser(10L);
-        verify(userRepository).deleteById(10L);
+    void deleteUser_Valid_CallsRepositoryAndSendsEvent() {
+        Long userId = 10L;
+        User userToDelete = User.builder()
+                .id(userId)
+                .name("Test")
+                .email("test@example.com")
+                .age(20)
+                .createdAt(LocalDateTime.now())
+                .build();
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(userToDelete));
+
+        userService.deleteUser(userId);
+
+        verify(userRepository).delete(userToDelete);
+
+        ArgumentCaptor<UserEvent> eventCaptor = ArgumentCaptor.forClass(UserEvent.class);
+        verify(kafkaTemplate).send(eq("user-events"), eventCaptor.capture());
+        UserEvent event = eventCaptor.getValue();
+        assertThat(event.getOperation()).isEqualTo("DELETE");
+        assertThat(event.getEmail()).isEqualTo("test@example.com");
+    }
+
+    @Test
+    void deleteUser_UserNotFound_ThrowsException() {
+        when(userRepository.findById(99L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> userService.deleteUser(99L))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("User not found");
+        verify(userRepository, never()).delete(any());
+        verifyNoInteractions(kafkaTemplate);
     }
 
     @Test
