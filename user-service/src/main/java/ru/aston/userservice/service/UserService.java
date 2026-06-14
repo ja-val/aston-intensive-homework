@@ -1,12 +1,14 @@
 package ru.aston.userservice.service;
 
 import lombok.RequiredArgsConstructor;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import ru.aston.userservice.dto.UserRequest;
 import ru.aston.userservice.dto.UserResponse;
 import ru.aston.userservice.dto.UserUpdateRequest;
 import ru.aston.userservice.entity.User;
+import ru.aston.userservice.event.UserEvent;
 import ru.aston.userservice.repository.UserRepository;
 
 import java.util.List;
@@ -18,6 +20,8 @@ import java.util.stream.Collectors;
 public class UserService {
 
     private final UserRepository userRepository;
+    private final KafkaTemplate<String, UserEvent> kafkaTemplate;
+    private static final String TOPIC = "user-events";
 
     @Transactional
     public UserResponse createUser(UserRequest request) {
@@ -37,6 +41,12 @@ public class UserService {
                 .age(request.getAge())
                 .build();
         User saved = userRepository.save(user);
+
+        kafkaTemplate.send(TOPIC, UserEvent.builder()
+                .operation("CREATE")
+                .email(saved.getEmail())
+                .build());
+
         return toResponse(saved);
     }
 
@@ -63,7 +73,16 @@ public class UserService {
         if (id == null || id <= 0) {
             throw new IllegalArgumentException("Invalid id");
         }
-        userRepository.deleteById(id);
+
+        User user = userRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        kafkaTemplate.send(TOPIC, UserEvent.builder()
+                .operation("DELETE")
+                .email(user.getEmail())
+                .build());
+
+        userRepository.delete(user);
     }
 
     public List<UserResponse> getAllUsers() {
