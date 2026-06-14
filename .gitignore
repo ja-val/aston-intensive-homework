@@ -31,3 +31,4 @@ Thumbs.db
 # Other temp files
 *.log
 *.tmp
+/user-service/src/main/resources/application-local.properties
